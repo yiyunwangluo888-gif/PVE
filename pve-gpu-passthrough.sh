@@ -1,130 +1,211 @@
 #!/bin/bash
-# Proxmox VE GPU直通一键配置脚本（普通直通版）
-# 功能：整块GPU直通给单个虚拟机
-# 使用方法：curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/pve-gpu-passthrough.sh | bash
-# 或：wget -qO- https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/pve-gpu-passthrough.sh | bash
+# ============================================================================
+# PVE GPU直通完整配置脚本 v4.0
+# 功能：一键配置GPU直通 + 反虚拟化检测
+# 作者：基于DeepSeek讨论总结
+# 使用方法：bash pve-gpu-passthrough-full.sh
+# 或：curl -sSL https://your-url.com/pve-gpu-passthrough-full.sh | bash
+# ============================================================================
 
-set -e
+set -e  # 遇到错误立即退出
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# ============================================================================
+# 1. 颜色定义（用于终端输出）
+# ============================================================================
+RED='\033[0;31m'      # 错误信息
+GREEN='\033[0;32m'    # 成功信息
+YELLOW='\033[1;33m'   # 警告信息
+BLUE='\033[0;34m'     # 步骤信息
+PURPLE='\033[0;35m'   # 提示信息
+CYAN='\033[0;36m'     # 说明信息
+NC='\033[0m'          # 重置颜色
 
-# 日志函数
-log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_step() { echo -e "${BLUE}[STEP $1]${NC} $2"; }
+# ============================================================================
+# 2. 日志输出函数
+# ============================================================================
+log_info() {
+    echo -e "${GREEN}[✓]${NC} $1"
+}
 
-# 检查root权限
-check_root() {
+log_step() {
+    echo -e "${BLUE}[→]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[✗]${NC} $1"
+}
+
+log_input() {
+    echo -e "${PURPLE}[?]${NC} $1"
+}
+
+log_debug() {
+    echo -e "${CYAN}[#]${NC} $1"
+}
+
+# ============================================================================
+# 3. 环境检查函数
+# ============================================================================
+check_environment() {
+    log_step "检查系统环境..."
+    
+    # 检查是否以root运行
     if [[ $EUID -ne 0 ]]; then
         log_error "请使用 sudo 或以 root 用户运行此脚本！"
         exit 1
     fi
-}
-
-# 检查是否为Proxmox VE
-check_pve() {
+    
+    # 检查是否为Proxmox VE系统
     if ! command -v pveversion &> /dev/null; then
         log_error "此脚本仅适用于 Proxmox VE 系统！"
+        log_error "检测到非PVE系统，请确认您正在运行Proxmox VE"
         exit 1
     fi
+    
+    # 显示系统信息
+    log_info "系统检测通过："
+    log_debug "PVE版本: $(pveversion | grep pve-manager)"
+    log_debug "内核版本: $(uname -r)"
+    log_debug "系统时间: $(date)"
 }
 
-# 显示欢迎信息
-show_welcome() {
-    cat << "EOF"
-╔══════════════════════════════════════════════════════════╗
-║      Proxmox VE GPU直通一键配置脚本（普通直通版）        ║
-║                    v1.0 - 整卡直通                       ║
-║               联系方式：qq3118552009                     ║
-╠══════════════════════════════════════════════════════════╣
-║ 功能特点：                                               ║
-║ ✓ 配置国内软件源镜像加速                                 ║
-║ ✓ 自动配置IOMMU和VFIO                                    ║
-║ ✓ 黑名单冲突的显卡驱动                                   ║
-║ ✓ 安装最新稳定版内核                                     ║
-║ ✓ 无需vGPU解锁/无需特殊驱动                              ║
-║                                                          ║
-║ 适用场景：                                               ║
-║ • 整块GPU直通给单个虚拟机                                ║
-║ • 游戏虚拟机/深度学习/3D渲染                             ║
-║ • NVIDIA/AMD显卡都支持                                   ║
-╚══════════════════════════════════════════════════════════╝
-EOF
+# ============================================================================
+# 4. 硬件检测函数
+# ============================================================================
+detect_hardware() {
+    log_step "检测硬件信息..."
+    
+    echo "══════════════════════════════════════════════════"
+    echo "                  硬件信息报告"
+    echo "══════════════════════════════════════════════════"
+    
+    # CPU信息
+    CPU_VENDOR=$(grep "vendor_id" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_MODEL=$(grep "model name" /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs)
+    CPU_FAMILY=$(grep "cpu family" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_MODEL_ID=$(grep "model" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_STEPPING=$(grep "stepping" /proc/cpuinfo | head -1 | awk '{print $3}')
+    
+    echo "CPU:"
+    echo "  供应商: $CPU_VENDOR"
+    echo "  型号: $CPU_MODEL"
+    echo "  家族: $CPU_FAMILY"
+    echo "  型号ID: $CPU_MODEL_ID"
+    echo "  步进: $CPU_STEPPING"
+    echo ""
+    
+    # 内存信息
+    MEM_TOTAL=$(free -h | grep Mem | awk '{print $2}')
+    echo "内存: $MEM_TOTAL"
+    echo ""
+    
+    # GPU信息
+    echo "GPU设备:"
+    if lspci | grep -q "VGA\|3D\|Display"; then
+        lspci | grep -E "VGA|3D|Display" | while read line; do
+            PCI_ID=$(echo $line | cut -d' ' -f1)
+            GPU_NAME=$(echo $line | cut -d' ' -f2-)
+            echo "  $PCI_ID - $GPU_NAME"
+            
+            # 检测音频设备
+            AUDIO_ID=$(echo $PCI_ID | sed 's/\.0/.1/')
+            if lspci -s $AUDIO_ID 2>/dev/null | grep -qi "audio"; then
+                AUDIO_NAME=$(lspci -s $AUDIO_ID | cut -d' ' -f2-)
+                echo "   音频设备: $AUDIO_ID - $AUDIO_NAME"
+            fi
+        done
+    else
+        echo "  未检测到GPU设备"
+    fi
+    
+    echo "══════════════════════════════════════════════════"
+    echo ""
 }
 
-# 显示警告并确认
+# ============================================================================
+# 5. 用户确认函数
+# ============================================================================
 confirm_execution() {
-    log_warn "⚠️  警告：此脚本将执行以下操作："
-    echo "1. 修改系统软件源配置"
+    echo ""
+    log_warn "⚠️  重要警告：此脚本将修改系统关键配置！"
+    echo ""
+    echo "脚本将执行以下操作："
+    echo "1. 修改系统软件源为国内镜像"
     echo "2. 修改GRUB引导参数（启用IOMMU）"
     echo "3. 配置VFIO驱动和模块黑名单"
-    echo "4. 需要重启系统"
+    echo "4. 生成反虚拟化检测参数"
+    echo "5. 需要重启系统生效"
     echo ""
-    log_info "请确认您要直通的GPU型号："
-    echo "NVIDIA显卡：执行 lspci | grep -i nvidia"
-    echo "AMD显卡：执行 lspci | grep -i amd"
+    log_warn "建议在执行前："
+    echo "  • 备份重要数据"
+    echo "  • 确保系统已经更新到最新"
+    echo "  • 了解您的硬件配置"
     echo ""
-    read -p "是否继续执行？(y/N): " -n 1 -r
+    
+    log_input "是否继续执行？(输入 y 继续，其他键退出): "
+    read -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "用户取消执行"
         exit 0
     fi
+    echo ""
 }
 
-# 步骤1：配置系统源
+# ============================================================================
+# 6. 配置软件源函数
+# ============================================================================
 configure_sources() {
-    log_step "1" "配置系统软件源为国内镜像"
+    log_step "配置软件源为国内镜像..."
     
-    # 备份原源文件
+    # 备份原文件
+    BACKUP_DIR="/root/backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p $BACKUP_DIR
+    
     if [ -f /etc/apt/sources.list ]; then
-        cp /etc/apt/sources.list /etc/apt/sources.list.bak
+        cp /etc/apt/sources.list $BACKUP_DIR/sources.list.bak
+        log_debug "已备份 /etc/apt/sources.list"
     fi
     
     if [ -f /etc/apt/sources.list.d/pve-enterprise.list ]; then
-        cp /etc/apt/sources.list.d/pve-enterprise.list /etc/apt/sources.list.d/pve-enterprise.list.bak
+        cp /etc/apt/sources.list.d/pve-enterprise.list $BACKUP_DIR/pve-enterprise.list.bak
+        log_debug "已备份企业版源"
     fi
     
-    # 配置Debian源（清华镜像）
-    cat > /etc/apt/sources.list << 'EOF'
-# 清华大学Debian镜像源
+    # 配置Debian清华源
+    log_info "配置Debian清华镜像源..."
+    cat > /etc/apt/sources.list << 'DEB_SOURCE'
+# 清华大学 Debian 12 (bookworm) 镜像源
 deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware
 deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware
 deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-backports main contrib non-free non-free-firmware
 deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware
-EOF
-
+DEB_SOURCE
+    
     # 配置PVE非订阅源
-    cat > /etc/apt/sources.list.d/pve-no-subscription.list << 'EOF'
-# 清华大学Proxmox镜像源
+    log_info "配置Proxmox VE非订阅源..."
+    cat > /etc/apt/sources.list.d/pve-no-subscription.list << 'PVE_SOURCE'
+# 清华大学 Proxmox VE 镜像源
 deb https://mirrors.tuna.tsinghua.edu.cn/proxmox/debian bookworm pve-no-subscription
-EOF
-
-    log_info "软件源配置完成"
+PVE_SOURCE
+    
+    # 禁用企业版源（避免认证错误）
+    rm -f /etc/apt/sources.list.d/pve-enterprise.list 2>/dev/null || true
+    
+    log_info "软件源配置完成，备份保存在: $BACKUP_DIR"
 }
 
-# 步骤2：更新系统
-update_system() {
-    log_step "2" "更新系统软件包"
-    
-    apt update
-    apt upgrade -y
-    apt autoremove -y
-    
-    log_info "系统更新完成"
-}
-
-# 步骤3：检测并配置IOMMU
+# ============================================================================
+# 7. 配置IOMMU函数
+# ============================================================================
 configure_iommu() {
-    log_step "3" "检测CPU类型并配置IOMMU"
+    log_step "配置IOMMU直通..."
     
-    # 检测CPU类型
+    # 检测CPU类型并配置相应参数
     if grep -q "GenuineIntel" /proc/cpuinfo; then
         IOMMU_PARAMS="intel_iommu=on iommu=pt"
         log_info "检测到 Intel CPU，启用 Intel IOMMU"
@@ -136,163 +217,437 @@ configure_iommu() {
         exit 1
     fi
     
-    # 获取当前GRUB参数
-    CURRENT_GRUB=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub | cut -d'"' -f2)
+    # 添加PCIe ACS覆盖（解决IOMMU分组问题）
+    IOMMU_PARAMS="$IOMMU_PARAMS pcie_acs_override=downstream,multifunction"
+    
+    # 获取当前GRUB配置
+    GRUB_FILE="/etc/default/grub"
+    cp $GRUB_FILE $GRUB_FILE.bak
+    log_debug "已备份GRUB配置: $GRUB_FILE.bak"
     
     # 检查是否已包含IOMMU参数
-    if echo "$CURRENT_GRUB" | grep -q "iommu="; then
-        log_info "GRUB已包含IOMMU参数，跳过配置"
+    CURRENT_CMDLINE=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' $GRUB_FILE | cut -d'"' -f2)
+    
+    if echo "$CURRENT_CMDLINE" | grep -q "iommu="; then
+        log_warn "GRUB已包含IOMMU参数，跳过配置"
+        log_debug "当前参数: $CURRENT_CMDLINE"
     else
-        # 添加IOMMU参数到GRUB
-        sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 $IOMMU_PARAMS\"/g" /etc/default/grub
+        # 更新GRUB配置
+        NEW_CMDLINE="$CURRENT_CMDLINE $IOMMU_PARAMS"
+        sed -i "s|GRUB_CMDLINE_LINUX_DEFAULT=\"$CURRENT_CMDLINE\"|GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_CMDLINE\"|g" $GRUB_FILE
+        
         log_info "已添加IOMMU参数到GRUB"
+        log_debug "新参数: $NEW_CMDLINE"
     fi
     
-    # 添加PCIe ACS覆盖（解决IOMMU分组问题）
-    if ! echo "$CURRENT_GRUB" | grep -q "pcie_acs_override"; then
-        sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 pcie_acs_override=downstream,multifunction\"/g" /etc/default/grub
-        log_info "已添加PCIe ACS覆盖参数"
-    fi
+    log_info "IOMMU配置完成"
 }
 
-# 步骤4：配置VFIO驱动
+# ============================================================================
+# 8. 配置VFIO驱动函数
+# ============================================================================
 configure_vfio() {
-    log_step "4" "配置VFIO驱动"
+    log_step "配置VFIO驱动..."
+    
+    # 备份原modules文件
+    MODULES_FILE="/etc/modules"
+    cp $MODULES_FILE $MODULES_FILE.bak 2>/dev/null || true
     
     # 添加VFIO模块到自动加载
-    if ! grep -q "^vfio$" /etc/modules; then
-        echo -e "\n# VFIO for GPU Passthrough" >> /etc/modules
-        echo "vfio" >> /etc/modules
-        echo "vfio_iommu_type1" >> /etc/modules
-        echo "vfio_pci" >> /etc/modules
-        echo "vfio_virqfd" >> /etc/modules
-        log_info "VFIO模块已添加到 /etc/modules"
+    log_info "添加VFIO模块到 /etc/modules"
+    
+    # 检查是否已添加
+    if ! grep -q "^vfio$" $MODULES_FILE; then
+        echo -e "\n# ========================================" >> $MODULES_FILE
+        echo "# VFIO for GPU Passthrough (Added by script)" >> $MODULES_FILE
+        echo "# ========================================" >> $MODULES_FILE
+        echo "vfio" >> $MODULES_FILE
+        echo "vfio_iommu_type1" >> $MODULES_FILE
+        echo "vfio_pci" >> $MODULES_FILE
+        echo "vfio_virqfd" >> $MODULES_FILE
+        log_info "VFIO模块已添加到启动加载"
+    else
+        log_warn "VFIO模块已存在，跳过添加"
     fi
     
-    # 检测显卡类型并配置黑名单
-    detect_and_blacklist_gpu
-}
-
-# 检测显卡类型并配置黑名单
-detect_and_blacklist_gpu() {
-    log_info "检测系统中的显卡..."
+    # 配置显卡驱动黑名单
+    log_info "配置显卡驱动黑名单..."
     
-    # 检测NVIDIA显卡
-    if lspci | grep -qi "NVIDIA"; then
-        log_info "检测到 NVIDIA 显卡"
-        BLACKLIST_CONF="/etc/modprobe.d/blacklist-nvidia.conf"
-        
-        cat > $BLACKLIST_CONF << 'EOF'
-# 黑名单NVIDIA驱动以避免冲突
+    BLACKLIST_FILE="/etc/modprobe.d/blacklist-gpu.conf"
+    cat > $BLACKLIST_FILE << 'BLACKLIST'
+# ========================================
+# GPU驱动黑名单配置
+# 防止原生驱动与VFIO冲突
+# ========================================
+
+# 禁用NVIDIA驱动
 blacklist nouveau
 blacklist nvidia
 blacklist nvidiafb
 blacklist nvidia_drm
 blacklist nvidia_modeset
-EOF
-        log_info "已创建NVIDIA驱动黑名单"
-        
-    # 检测AMD显卡
-    elif lspci | grep -qi "AMD\|ATI\|Radeon"; then
-        log_info "检测到 AMD 显卡"
-        BLACKLIST_CONF="/etc/modprobe.d/blacklist-amd.conf"
-        
-        cat > $BLACKLIST_CONF << 'EOF'
-# 黑名单AMD驱动以避免冲突
+
+# 禁用AMD驱动
 blacklist radeon
 blacklist amdgpu
-EOF
-        log_info "已创建AMD驱动黑名单"
-    else
-        log_warn "未检测到常见显卡，使用通用黑名单"
-        BLACKLIST_CONF="/etc/modprobe.d/blacklist-gpu.conf"
-        
-        cat > $BLACKLIST_CONF << 'EOF'
-# 通用显卡驱动黑名单
-blacklist nouveau
-blacklist nvidia
-blacklist nvidiafb
-blacklist radeon
-blacklist amdgpu
+
+# 禁用Intel集成显卡（如果需要）
+# blacklist i915
+
+# 禁用音频驱动（避免冲突）
 blacklist snd_hda_intel
-EOF
-    fi
+BLACKLIST
     
-    # 创建VFIO配置
-    VFIO_CONF="/etc/modprobe.d/vfio.conf"
+    log_info "驱动黑名单配置完成: $BLACKLIST_FILE"
     
-    cat > $VFIO_CONF << 'EOF'
-# VFIO配置
+    # 配置VFIO参数
+    VFIO_CONF_FILE="/etc/modprobe.d/vfio.conf"
+    cat > $VFIO_CONF_FILE << 'VFIO_CONF'
+# ========================================
+# VFIO 驱动配置
+# ========================================
+
+# 允许不安全中断（某些设备需要）
 options vfio_iommu_type1 allow_unsafe_interrupts=1
-EOF
+
+# 默认情况下禁用VFIO VGA（避免宿主机无法显示）
+options vfio-pci disable_vga=1
+
+# 设备ID将在后续步骤中自动添加
+# options vfio-pci ids=xxxx:xxxx
+VFIO_CONF
     
-    log_info "VFIO配置完成"
+    log_info "VFIO参数配置完成: $VFIO_CONF_FILE"
 }
 
-# 步骤5：获取GPU PCI ID用于VFIO绑定
-get_gpu_pci_ids() {
-    log_step "5" "检测GPU的PCI ID用于直通"
+# ============================================================================
+# 9. 检测GPU并配置绑定
+# ============================================================================
+configure_gpu_binding() {
+    log_step "检测GPU设备并配置绑定..."
     
-    log_info "正在检测系统中的GPU..."
+    # 查找所有GPU设备
+    GPU_LIST=$(lspci | grep -E "VGA|3D|Display" | awk '{print $1}')
     
-    # 显示所有GPU设备
-    echo ""
-    echo "═══════════════════════════════════════════════════════"
-    echo "检测到的GPU设备列表："
-    echo "═══════════════════════════════════════════════════════"
-    lspci | grep -E "VGA|3D|Display" | while read line; do
-        PCI_ID=$(echo $line | cut -d' ' -f1)
-        DEVICE_NAME=$(echo $line | cut -d' ' -f2-)
-        echo "PCI ID: $PCI_ID - $DEVICE_NAME"
-    done
-    echo "═══════════════════════════════════════════════════════"
-    echo ""
-    
-    # 询问用户选择要直通的GPU
-    read -p "请输入要直通的GPU的PCI ID（如 01:00.0）： " GPU_PCI_ID
-    
-    if [[ -z "$GPU_PCI_ID" ]]; then
-        log_warn "未指定PCI ID，跳过VFIO绑定配置"
-        return
+    if [ -z "$GPU_LIST" ]; then
+        log_warn "未检测到GPU设备，跳过GPU绑定配置"
+        return 0
     fi
     
-    # 获取供应商和设备ID
-    if command -v lspci &> /dev/null; then
-        VENDOR_DEVICE=$(lspci -n -s $GPU_PCI_ID | cut -d' ' -f3)
-        if [[ ! -z "$VENDOR_DEVICE" ]]; then
-            # 添加到VFIO配置
-            echo "options vfio-pci ids=$VENDOR_DEVICE" >> /etc/modprobe.d/vfio.conf
-            log_info "已将GPU $GPU_PCI_ID ($VENDOR_DEVICE) 添加到VFIO绑定"
+    echo ""
+    echo "══════════════════════════════════════════════════"
+    echo "              检测到的GPU设备"
+    echo "══════════════════════════════════════════════════"
+    
+    VFIO_IDS=""
+    GPU_COUNT=0
+    
+    for GPU in $GPU_LIST; do
+        GPU_INFO=$(lspci -s $GPU)
+        GPU_ID=$(lspci -n -s $GPU | awk '{print $3}')
+        
+        echo ""
+        echo "[GPU $((++GPU_COUNT))]"
+        echo "  PCI地址: $GPU"
+        echo "  设备ID: $GPU_ID"
+        echo "  描述: ${GPU_INFO#*: }"
+        
+        # 检测音频设备
+        AUDIO_GPU=$(echo $GPU | sed 's/\.0/.1/')
+        if lspci -s $AUDIO_GPU 2>/dev/null | grep -qi "audio"; then
+            AUDIO_ID=$(lspci -n -s $AUDIO_GPU | awk '{print $3}')
+            AUDIO_INFO=$(lspci -s $AUDIO_GPU)
+            echo "  音频设备:"
+            echo "    PCI地址: $AUDIO_GPU"
+            echo "    设备ID: $AUDIO_ID"
+            echo "    描述: ${AUDIO_INFO#*: }"
             
-            # 也添加到内核参数（可选）
-            CURRENT_GRUB=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub | cut -d'"' -f2)
-            if ! echo "$CURRENT_GRUB" | grep -q "vfio-pci.ids"; then
-                sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 vfio-pci.ids=$VENDOR_DEVICE\"/g" /etc/default/grub
-                log_info "已将GPU ID添加到内核参数"
+            # 添加到绑定列表
+            if [ -n "$VFIO_IDS" ]; then
+                VFIO_IDS="$VFIO_IDS,$GPU_ID,$AUDIO_ID"
+            else
+                VFIO_IDS="$GPU_ID,$AUDIO_ID"
             fi
+        else
+            # 只有视频设备
+            if [ -n "$VFIO_IDS" ]; then
+                VFIO_IDS="$VFIO_IDS,$GPU_ID"
+            else
+                VFIO_IDS="$GPU_ID"
+            fi
+        fi
+    done
+    
+    echo "══════════════════════════════════════════════════"
+    echo ""
+    
+    if [ -n "$VFIO_IDS" ]; then
+        log_info "检测到GPU设备，自动配置VFIO绑定"
+        log_debug "设备ID列表: $VFIO_IDS"
+        
+        # 更新VFIO配置
+        echo "options vfio-pci ids=$VFIO_IDS" >> /etc/modprobe.d/vfio.conf
+        
+        log_info "已配置VFIO自动绑定以下设备:"
+        echo "$VFIO_IDS" | tr ',' '\n' | while read ID; do
+            echo "  - $ID"
+        done
+        
+        # 询问是否选择特定GPU
+        echo ""
+        log_input "是否要选择特定GPU进行直通？(输入y手动选择，直接回车使用全部GPU): "
+        read -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            manual_select_gpu
+        fi
+    else
+        log_warn "未获取到有效的GPU设备ID，跳过自动绑定"
+    fi
+}
+
+# ============================================================================
+# 10. 手动选择GPU函数
+# ============================================================================
+manual_select_gpu() {
+    log_step "手动选择GPU设备..."
+    
+    echo ""
+    echo "请选择要直通的GPU（输入数字，多个用逗号分隔，如 1,3）:"
+    
+    # 显示GPU列表
+    GPU_INDEX=0
+    declare -A GPU_MAP
+    
+    lspci | grep -E "VGA|3D|Display" | while read line; do
+        GPU_INDEX=$((GPU_INDEX + 1))
+        PCI_ID=$(echo $line | awk '{print $1}')
+        GPU_DESC=$(echo $line | cut -d' ' -f2-)
+        GPU_MAP[$GPU_INDEX]=$PCI_ID
+        
+        echo "  $GPU_INDEX. $PCI_ID - $GPU_DESC"
+    done
+    
+    echo ""
+    log_input "请输入选择（直接回车跳过）: "
+    read -r SELECTION
+    
+    if [ -n "$SELECTION" ]; then
+        # 清空之前的绑定配置
+        sed -i '/options vfio-pci ids=/d' /etc/modprobe.d/vfio.conf
+        
+        NEW_VFIO_IDS=""
+        IFS=',' read -ra SELECTED <<< "$SELECTION"
+        
+        for INDEX in "${SELECTED[@]}"; do
+            INDEX=$(echo $INDEX | xargs)  # 去除空格
+            if [ -n "${GPU_MAP[$INDEX]}" ]; then
+                GPU_PCI=${GPU_MAP[$INDEX]}
+                GPU_ID=$(lspci -n -s $GPU_PCI | awk '{print $3}')
+                
+                # 获取音频设备
+                AUDIO_PCI=$(echo $GPU_PCI | sed 's/\.0/.1/')
+                AUDIO_ID=$(lspci -n -s $AUDIO_PCI 2>/dev/null | awk '{print $3}')
+                
+                if [ -n "$NEW_VFIO_IDS" ]; then
+                    if [ -n "$AUDIO_ID" ]; then
+                        NEW_VFIO_IDS="$NEW_VFIO_IDS,$GPU_ID,$AUDIO_ID"
+                    else
+                        NEW_VFIO_IDS="$NEW_VFIO_IDS,$GPU_ID"
+                    fi
+                else
+                    if [ -n "$AUDIO_ID" ]; then
+                        NEW_VFIO_IDS="$GPU_ID,$AUDIO_ID"
+                    else
+                        NEW_VFIO_IDS="$GPU_ID"
+                    fi
+                fi
+                
+                log_info "已选择GPU: $GPU_PCI ($GPU_ID)"
+            fi
+        done
+        
+        if [ -n "$NEW_VFIO_IDS" ]; then
+            echo "options vfio-pci ids=$NEW_VFIO_IDS" >> /etc/modprobe.d/vfio.conf
+            log_info "已更新VFIO绑定配置"
         fi
     fi
 }
 
-# 步骤6：安装必要工具
-install_tools() {
-    log_step "6" "安装必要的工具"
+# ============================================================================
+# 11. 生成反虚拟化参数函数
+# ============================================================================
+generate_anti_vm_config() {
+    log_step "生成反虚拟化检测参数..."
     
-    apt install -y \
-        hwloc \
-        cpu-checker \
-        pciutils \
-        lsb-release \
-        sysfsutils
+    # 获取CPU信息
+    CPU_VENDOR=$(grep "vendor_id" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_FAMILY=$(grep "cpu family" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_MODEL=$(grep "model" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_STEPPING=$(grep "stepping" /proc/cpuinfo | head -1 | awk '{print $3}')
+    CPU_MODEL_NAME=$(grep "model name" /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs)
     
-    log_info "工具安装完成"
+    # 清理CPU型号名称
+    CLEAN_MODEL_NAME=$(echo "$CPU_MODEL_NAME" | sed -e 's/Intel(R) //' -e 's/CPU //' -e 's/ @.*//' -e 's/ Processor//')
+    
+    # 生成反虚拟化参数
+    ANTIVM_ARGS="-cpu host"
+    
+    # CPU参数
+    ANTIVM_ARGS="$ANTIVM_ARGS,family='$CPU_FAMILY',model='$CPU_MODEL',stepping='$CPU_STEPPING'"
+    
+    # 自定义型号ID（可以修改为您想要显示的名称）
+    CUSTOM_MODEL_ID="Intel Core i7 12700 @ 4.90GHz"
+    log_input "输入想要显示的CPU型号（直接回车使用默认: $CUSTOM_MODEL_ID）: "
+    read -r USER_MODEL_ID
+    if [ -n "$USER_MODEL_ID" ]; then
+        CUSTOM_MODEL_ID="$USER_MODEL_ID"
+    fi
+    ANTIVM_ARGS="$ANTIVM_ARGS,model_id='$CUSTOM_MODEL_ID'"
+    
+    # KVM参数
+    ANTIVM_ARGS="$ANTIVM_ARGS,+kvm_pv_unhalt,+kvm_pv_eoi"
+    
+    # Hyper-V参数
+    ANTIVM_ARGS="$ANTIVM_ARGS,hv_spinlocks=0x1fff,hv_vapic,hv_time,hv_reset,hv_vpindex,hv_runtime,hv_relaxed"
+    
+    # 虚拟化检测绕过
+    ANTIVM_ARGS="$ANTIVM_ARGS,kvm=off"
+    
+    # 厂商ID（根据CPU类型选择）
+    if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
+        ANTIVM_ARGS="$ANTIVM_ARGS,hv_vendor_id=intel"
+    else
+        ANTIVM_ARGS="$ANTIVM_ARGS,hv_vendor_id=amd"
+    fi
+    
+    # 其他参数
+    ANTIVM_ARGS="$ANTIVM_ARGS,vmware-cpuid-freq=false,enforce=false,host-phys-bits=true,hypervisor=off"
+    
+    # SMBIOS参数（模拟真实硬件）
+    ANTIVM_ARGS="$ANTIVM_ARGS -smbios type=0"
+    ANTIVM_ARGS="$ANTIVM_ARGS -smbios type=9"
+    ANTIVM_ARGS="$ANTIVM_ARGS -smbios type=8"
+    ANTIVM_ARGS="$ANTIVM_ARGS -smbios type=8"
+    
+    # 保存参数到文件
+    ANTIVM_FILE="/root/anti-vm-args.txt"
+    echo "$ANTIVM_ARGS" > $ANTIVM_FILE
+    
+    echo ""
+    echo "══════════════════════════════════════════════════"
+    echo "           生成的反虚拟化参数"
+    echo "══════════════════════════════════════════════════"
+    echo "$ANTIVM_ARGS"
+    echo "══════════════════════════════════════════════════"
+    echo ""
+    
+    log_info "参数已保存到: $ANTIVM_FILE"
+    log_info "在创建虚拟机时，将此参数添加到'args:'配置项中"
+    
+    # 询问是否创建示例虚拟机配置
+    log_input "是否创建示例虚拟机配置文件？(y/N): "
+    read -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        create_example_vm_config "$ANTIVM_ARGS"
+    fi
 }
 
-# 步骤7：更新引导配置
-update_boot_config() {
-    log_step "7" "更新系统引导配置"
+# ============================================================================
+# 12. 创建示例虚拟机配置
+# ============================================================================
+create_example_vm_config() {
+    local ARGS="$1"
     
-    log_info "更新GRUB引导..."
+    log_step "创建示例虚拟机配置文件..."
+    
+    EXAMPLE_FILE="/root/vm-gpu-example.conf"
+    
+    cat > $EXAMPLE_FILE << EXAMPLE_CONF
+# ========================================
+# Proxmox VE GPU直通虚拟机配置示例
+# 生成时间: $(date)
+# ========================================
+
+# 虚拟机基本信息
+boot: order=scsi0;net0
+cores: 4
+cpu: host
+memory: 8192
+name: gpu-vm-example
+net0: virtio=xx:xx:xx:xx:xx:xx,bridge=vmbr0
+numa: 1
+ostype: win11
+scsi0: local-lvm:vm-100-disk-0,size=128G
+scsihw: virtio-scsi-pci
+smbios1: uuid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+sockets: 1
+vmgenid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# ========================================
+# GPU直通配置（根据您的GPU修改）
+# ========================================
+
+# 视频设备（示例：第一个NVIDIA GPU）
+# hostpci0: 03:00.0,pcie=1,x-vga=1
+
+# 音频设备（与GPU配套）
+# hostpci1: 03:00.1,pcie=1
+
+# ========================================
+# 反虚拟化检测参数（复制以下内容）
+# ========================================
+args: $ARGS
+
+# ========================================
+# 其他优化配置
+# ========================================
+
+# 启用QEMU代理（需要在虚拟机内安装qemu-guest-agent）
+agent: 1
+
+# 禁用Ballooning（避免内存动态调整影响性能）
+balloon: 0
+
+# 使用Q35机器类型（推荐）
+machine: pc-q35-9.0
+
+# 使用OVMF UEFI（推荐用于Windows 10/11）
+bios: ovmf
+efidisk0: local-lvm:4M
+
+# 启用NUMA（多CPU插槽系统）
+numa: 1
+
+# ========================================
+# 使用说明：
+# 1. 复制此配置到 /etc/pve/qemu-server/XXX.conf
+# 2. 修改hostpciX指向您的GPU设备
+# 3. 修改网络MAC地址
+# 4. 调整CPU、内存等参数
+# 5. 创建虚拟机磁盘
+# ========================================
+EXAMPLE_CONF
+    
+    log_info "示例配置文件已创建: $EXAMPLE_FILE"
+    log_info "请根据您的硬件修改配置"
+}
+
+# ============================================================================
+# 13. 更新系统配置
+# ============================================================================
+update_system_config() {
+    log_step "更新系统配置..."
+    
+    # 更新软件包列表
+    log_info "更新软件包列表..."
+    apt update 2>/dev/null || {
+        log_warn "apt update 失败，尝试继续..."
+    }
+    
+    # 更新GRUB引导
+    log_info "更新GRUB引导配置..."
     if update-grub; then
         log_info "GRUB更新成功"
     else
@@ -300,6 +655,7 @@ update_boot_config() {
         exit 1
     fi
     
+    # 更新initramfs
     log_info "更新initramfs..."
     if update-initramfs -u -k all; then
         log_info "initramfs更新成功"
@@ -308,144 +664,299 @@ update_boot_config() {
         exit 1
     fi
     
-    log_info "引导配置更新完成"
+    # 创建验证脚本
+    create_verification_script
+    
+    log_info "系统配置更新完成"
 }
 
-# 步骤8：显示验证信息
-show_verification_info() {
-    log_step "8" "验证配置信息"
+# ============================================================================
+# 14. 创建验证脚本
+# ============================================================================
+create_verification_script() {
+    log_step "创建验证脚本..."
     
-    echo ""
-    echo "═══════════════════════════════════════════════════════"
-    echo "配置完成！请验证以下信息："
-    echo "═══════════════════════════════════════════════════════"
-    echo ""
+    VERIFY_SCRIPT="/root/check-gpu-passthrough.sh"
     
-    # 显示IOMMU状态
-    echo "1. IOMMU是否启用："
-    if dmesg | grep -q "IOMMU"; then
-        echo "   ✓ IOMMU已检测到"
+    cat > $VERIFY_SCRIPT << 'VERIFY_EOF'
+#!/bin/bash
+# GPU直通验证脚本
+# 使用方法：bash check-gpu-passthrough.sh
+
+echo "══════════════════════════════════════════════════"
+echo "            GPU直通配置验证"
+echo "══════════════════════════════════════════════════"
+echo ""
+
+# 检查系统信息
+echo "1. 系统信息:"
+echo "   PVE版本: $(pveversion 2>/dev/null | grep pve-manager || echo "未安装PVE")"
+echo "   内核版本: $(uname -r)"
+echo "   系统时间: $(date)"
+echo ""
+
+# 检查GRUB配置
+echo "2. GRUB配置:"
+GRUB_CMD=$(grep '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub 2>/dev/null | cut -d'"' -f2)
+if [ -n "$GRUB_CMD" ]; then
+    echo "   当前参数: $GRUB_CMD"
+    
+    # 检查关键参数
+    if echo "$GRUB_CMD" | grep -q "iommu=on"; then
+        echo "   ✅ IOMMU已启用"
     else
-        echo "   ✗ IOMMU未检测到，请检查BIOS设置"
+        echo "   ❌ IOMMU未启用"
     fi
     
-    # 显示IOMMU分组
-    echo ""
-    echo "2. IOMMU分组信息："
-    echo "   运行以下命令查看分组："
-    echo "   bash -c \"for d in /sys/kernel/iommu_groups/*/devices/*; do n=\${d#*/iommu_groups/*}; n=\${n%%/*}; printf 'IOMMU组 %s ' \\\$n; lspci -nns \\\${d##*/}; done\""
+    if echo "$GRUB_CMD" | grep -q "iommu=pt"; then
+        echo "   ✅ IOMMU PT模式已启用"
+    else
+        echo "   ❌ IOMMU PT模式未启用"
+    fi
+else
+    echo "   ❌ 无法读取GRUB配置"
+fi
+echo ""
+
+# 检查VFIO驱动
+echo "3. VFIO驱动状态:"
+if lsmod | grep -q vfio; then
+    echo "   ✅ VFIO驱动已加载"
+    lsmod | grep vfio | while read line; do
+        echo "      $line"
+    done
+else
+    echo "   ❌ VFIO驱动未加载"
+fi
+echo ""
+
+# 检查GPU设备
+echo "4. GPU设备状态:"
+GPU_COUNT=0
+lspci | grep -E "VGA|3D|Display" | while read line; do
+    GPU_COUNT=$((GPU_COUNT + 1))
+    PCI_ID=$(echo $line | awk '{print $1}')
+    DEVICE_NAME=$(echo $line | cut -d' ' -f2-)
     
-    # 显示GPU信息
-    echo ""
-    echo "3. GPU当前状态："
-    lspci | grep -E "VGA|3D|Display" | head -5
+    echo "   GPU $GPU_COUNT:"
+    echo "     地址: $PCI_ID"
+    echo "     名称: $DEVICE_NAME"
     
-    # 显示下一步操作
+    # 检查驱动绑定
+    DRIVER_INFO=$(lspci -k -s $PCI_ID 2>/dev/null | grep "Kernel driver in use:" || echo "")
+    if [ -n "$DRIVER_INFO" ]; then
+        echo "     驱动: $DRIVER_INFO"
+        if echo "$DRIVER_INFO" | grep -q "vfio-pci"; then
+            echo "     ✅ 已绑定到VFIO（可直通）"
+        else
+            echo "     ⚠️  未绑定到VFIO"
+        fi
+    fi
+    
+    # 检查音频设备
+    AUDIO_PCI=$(echo $PCI_ID | sed 's/\.0/.1/')
+    if lspci -s $AUDIO_PCI 2>/dev/null | grep -qi "audio"; then
+        echo "     音频设备: $AUDIO_PCI"
+    fi
     echo ""
-    echo "═══════════════════════════════════════════════════════"
-    echo "下一步操作："
-    echo "═══════════════════════════════════════════════════════"
-    echo "1. 重启系统以应用所有更改："
-    echo "   reboot"
+done
+
+if [ $GPU_COUNT -eq 0 ]; then
+    echo "   ⚠️  未检测到GPU设备"
+fi
+
+# 检查配置文件
+echo "5. 配置文件检查:"
+echo "   GRUB配置: /etc/default/grub"
+echo "   模块配置: /etc/modules"
+echo "   黑名单: /etc/modprobe.d/blacklist-gpu.conf"
+echo "   VFIO配置: /etc/modprobe.d/vfio.conf"
+echo ""
+
+# 检查IOMMU分组
+echo "6. IOMMU分组信息（前5组）:"
+for group in $(find /sys/kernel/iommu_groups/ -maxdepth 1 -type d | sort -V | head -6); do
+    group_num=$(basename $group)
+    if [ "$group_num" != "iommu_groups" ]; then
+        devices=$(ls $group/devices/ 2>/dev/null | wc -l)
+        if [ $devices -gt 0 ]; then
+            echo "   组 $group_num: $devices 个设备"
+            # 显示设备信息
+            for device in $(ls $group/devices/ 2>/dev/null | head -3); do
+                device_info=$(lspci -s $device 2>/dev/null | cut -d' ' -f2-)
+                echo "     - $device: $device_info"
+            done
+            if [ $devices -gt 3 ]; then
+                echo "     ... 还有 $((devices - 3)) 个设备"
+            fi
+        fi
+    fi
+done
+echo ""
+
+# 使用建议
+echo "7. 使用建议:"
+echo "   ✅ 如果所有检查通过，可以创建虚拟机并添加PCI设备"
+echo "   ⚠️  需要重启系统以使配置生效"
+echo "   📝 反虚拟化参数保存在: /root/anti-vm-args.txt"
+echo "   📋 示例配置: /root/vm-gpu-example.conf"
+echo ""
+
+echo "══════════════════════════════════════════════════"
+echo "验证完成！"
+echo ""
+
+# 询问是否测试
+read -p "是否测试VFIO绑定？(y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "测试VFIO绑定..."
+    for GPU in $(lspci | grep -E "VGA|3D|Display" | awk '{print $1}'); do
+        echo "测试设备 $GPU:"
+        if lspci -k -s $GPU | grep -q "vfio-pci"; then
+            echo "  ✅ 已绑定到VFIO"
+        else
+            echo "  ⚠️  未绑定到VFIO，可能需要重启"
+        fi
+    done
+fi
+VERIFY_EOF
+    
+    chmod +x $VERIFY_SCRIPT
+    log_info "验证脚本已创建: $VERIFY_SCRIPT"
+}
+
+# ============================================================================
+# 15. 显示完成信息
+# ============================================================================
+show_completion() {
     echo ""
-    echo "2. 重启后验证："
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "                   配置完成！🎉"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "✅ 所有配置已完成！"
+    echo ""
+    echo "📋 已执行的操作："
+    echo "   1. 系统环境检查"
+    echo "   2. 硬件信息检测"
+    echo "   3. 软件源配置（清华镜像）"
+    echo "   4. IOMMU配置"
+    echo "   5. VFIO驱动配置"
+    echo "   6. GPU设备检测和绑定"
+    echo "   7. 反虚拟化参数生成"
+    echo "   8. 系统配置更新"
+    echo ""
+    echo "📁 生成的文件："
+    echo "   • /root/anti-vm-args.txt        - 反虚拟化参数"
+    echo "   • /root/vm-gpu-example.conf     - 虚拟机配置示例"
+    echo "   • /root/check-gpu-passthrough.sh - 验证脚本"
+    echo ""
+    echo "⚠️  重要提示："
+    echo "   必须重启系统才能使所有配置生效！"
+    echo ""
+    echo "🚀 重启后操作："
+    echo "   1. 运行验证脚本：bash /root/check-gpu-passthrough.sh"
+    echo "   2. 创建虚拟机并添加PCI设备"
+    echo "   3. 在虚拟机配置中添加反虚拟化参数"
+    echo "   4. 安装操作系统和GPU驱动"
+    echo ""
+    echo "🔧 验证命令："
     echo "   # 检查IOMMU"
     echo "   dmesg | grep -i iommu"
     echo ""
     echo "   # 检查VFIO驱动"
     echo "   lsmod | grep vfio"
     echo ""
-    echo "3. 在Proxmox Web界面配置直通："
-    echo "   a. 创建或编辑虚拟机"
-    echo "   b. 添加PCI设备"
-    echo "   c. 选择您的GPU设备"
-    echo "   d. 勾选'所有功能'和'PCI-Express'"
+    echo "   # 检查GPU绑定"
+    echo "   lspci -k | grep -A2 -B2 vfio-pci"
     echo ""
-    echo "4. 常见问题："
-    echo "   • 如果虚拟机无法启动，检查IOMMU分组"
-    echo "   • 确保BIOS中已启用VT-d/AMD-Vi"
-    echo "   • 某些主板需要ACS补丁"
-    echo "═══════════════════════════════════════════════════════"
-}
-
-# 步骤9：询问是否重启
-ask_for_reboot() {
+    echo "═══════════════════════════════════════════════════════════════"
+    
+    # 询问是否重启
     echo ""
-    read -p "是否立即重启系统以应用配置？(y/N): " -n 1 -r
+    log_input "是否立即重启系统？(输入 y 重启，其他键稍后手动重启): "
+    read -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        log_info "系统将在5秒后重启..."
-        sleep 5
+        log_info "系统将在10秒后重启..."
+        echo "按 Ctrl+C 可以取消重启"
+        sleep 10
         reboot
     else
-        log_info "请记得手动重启系统以应用所有更改"
-        log_info "重启后，GPU直通配置才会生效"
+        log_info "请记得手动重启系统以使配置生效"
+        log_info "重启命令: reboot"
     fi
 }
 
-# 错误处理
-error_handler() {
+# ============================================================================
+# 16. 错误处理函数
+# ============================================================================
+handle_error() {
     log_error "脚本执行出错！"
-    log_error "请检查："
-    log_error "1. 网络连接是否正常"
-    log_error "2. 系统是否为Proxmox VE"
-    log_error "3. 查看详细日志：tail -f /var/log/syslog"
-    log_error "4. 可以手动恢复备份："
-    log_error "   cp /etc/apt/sources.list.bak /etc/apt/sources.list"
-    log_error "   cp /etc/apt/sources.list.d/pve-enterprise.list.bak /etc/apt/sources.list.d/pve-enterprise.list"
+    log_error "错误发生在第 $1 行"
+    log_error "退出状态: $2"
+    
+    echo ""
+    echo "══════════════════════════════════════════════════"
+    echo "                   故障排除"
+    echo "══════════════════════════════════════════════════"
+    echo ""
+    echo "1. 检查错误信息"
+    echo "2. 查看日志: tail -f /var/log/syslog"
+    echo "3. 恢复备份: 备份文件在 /root/backup_*/"
+    echo "4. 手动检查配置"
+    echo ""
+    echo "如果需要帮助，请提供以下信息："
+    echo "   • 错误信息"
+    echo "   • 系统版本: pveversion"
+    echo "   • 硬件信息: lspci | grep -E 'VGA|3D'"
+    echo ""
+    
     exit 1
 }
 
-# 显示硬件检测信息
-show_hardware_info() {
-    log_info "硬件检测结果："
-    echo "═══════════════════════════════════════════════════════"
-    
-    # CPU信息
-    echo "CPU型号: $(grep "model name" /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs)"
-    echo "CPU供应商: $(grep "vendor_id" /proc/cpuinfo | head -1 | cut -d':' -f2 | xargs)"
-    
-    # 内存信息
-    echo "内存总量: $(free -h | grep Mem | awk '{print $2}')"
-    
-    # 显卡信息
-    echo "显卡设备:"
-    lspci | grep -E "VGA|3D|Display" | while read line; do
-        echo "  - $line"
-    done
-    
-    echo "═══════════════════════════════════════════════════════"
-    echo ""
-}
-
-# 主执行流程
+# ============================================================================
+# 17. 主执行流程
+# ============================================================================
 main() {
-    trap error_handler ERR
+    # 设置错误处理
+    trap 'handle_error ${LINENO} ${?}' ERR
     
     # 显示欢迎信息
-    show_welcome
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "      Proxmox VE GPU直通一键配置脚本"
+    echo "               版本 4.0 - 完整版"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "📌 功能："
+    echo "   • 自动检测硬件"
+    echo "   • 配置IOMMU和VFIO"
+    echo "   • 生成反虚拟化参数"
+    echo "   • 创建验证脚本"
+    echo ""
+    echo "⏱️  预计时间：3-5分钟"
+    echo ""
     
-    # 检查环境和确认
-    check_root
-    check_pve
-    show_hardware_info
+    # 执行所有步骤
+    check_environment
+    detect_hardware
     confirm_execution
-    
-    # 执行所有配置步骤
     configure_sources
-    update_system
     configure_iommu
     configure_vfio
-    get_gpu_pci_ids
-    install_tools
-    update_boot_config
-    
-    # 显示验证信息和询问重启
-    show_verification_info
-    ask_for_reboot
+    configure_gpu_binding
+    generate_anti_vm_config
+    update_system_config
+    show_completion
     
     log_info "脚本执行完成！"
 }
 
-# 执行主函数
-main "$@"
+# ============================================================================
+# 18. 脚本入口
+# ============================================================================
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
